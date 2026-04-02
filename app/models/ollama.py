@@ -110,3 +110,14 @@ class OllamaProvider(ModelProvider):
             resp.raise_for_status()
         logger.info("Unloaded model %s", name)
         return f"Unloaded {name}"
+
+    async def delete_model(self, name: str) -> str:
+        """Remove a model from local storage."""
+        logger.info("Deleting model %s", name)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.request(
+                "DELETE", f"{self.base_url}/api/delete",
+                json={"name": name},
+            )
+            resp.raise_for_status()
+        return f"Deleted {name}"

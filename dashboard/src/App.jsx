@@ -6,12 +6,18 @@ import FileBrowser from './components/FileBrowser.jsx'
 import DbExplorer from './components/DbExplorer.jsx'
 import TaskBoard from './components/TaskBoard.jsx'
 import NotesBrowser from './components/NotesBrowser.jsx'
+import ControlPanel from './components/ControlPanel.jsx'
+import ImageGallery from './components/ImageGallery.jsx'
+import AudioGallery from './components/AudioGallery.jsx'
 
 const WS_URL = `ws://${window.location.hostname}:8000/ws/logs`
 
 const TABS = [
+  { id: 'control', label: 'Control' },
   { id: 'logs', label: 'Logs' },
   { id: 'output', label: 'Model Output' },
+  { id: 'images', label: 'Images' },
+  { id: 'audio', label: 'Audio' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'notes', label: 'Notes' },
   { id: 'files', label: 'Files' },
@@ -198,13 +204,16 @@ export default function App() {
         </aside>
 
         <main style={css.main}>
+          {activeTab === 'control' && <ControlPanel />}
           {activeTab === 'logs' && <LogStream logs={logs} />}
           {activeTab === 'output' && <ModelOutput logs={logs} />}
+          {activeTab === 'images' && <ImageGallery />}
+          {activeTab === 'audio' && <AudioGallery />}
           {activeTab === 'tasks' && <TaskBoard />}
           {activeTab === 'notes' && <NotesBrowser />}
           {activeTab === 'files' && <FileBrowser />}
           {activeTab === 'db' && <DbExplorer />}
-          {activeTab !== 'files' && activeTab !== 'db' && activeTab !== 'tasks' && activeTab !== 'notes' && (
+          {activeTab !== 'files' && activeTab !== 'db' && activeTab !== 'tasks' && activeTab !== 'notes' && activeTab !== 'control' && activeTab !== 'images' && activeTab !== 'audio' && (
             <ChatBar value={chatInput} onChange={setChatInput} onSend={sendChat} />
           )}
         </main>

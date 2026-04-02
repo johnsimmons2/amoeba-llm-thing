@@ -42,3 +42,6 @@ class ModelManager:
 
     async def unload_model(self, name: str) -> str:
         return await self._provider.unload_model(name)
+
+    async def delete_model(self, name: str) -> str:
+        return await self._provider.delete_model(name)

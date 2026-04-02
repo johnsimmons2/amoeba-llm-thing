@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+from app.config import DATA_DIR, CIVITAI_API_KEY
 
 router = APIRouter(prefix="/api")
 
@@ -26,6 +33,19 @@ class ModeChange(BaseModel):
 class ModelChange(BaseModel):
     agent_id: str
     model: str
+
+
+class SpawnRequest(BaseModel):
+    role: str = "assistant"
+    model: str = "qwen3.5:27b"
+    system_prompt: str = ""
+    goal: str = ""
+    agent_id: str = ""
+    mode: str = "chat"  # start in chat mode by default
+
+
+class PullModelRequest(BaseModel):
+    name: str
 
 
 @router.get("/health")
@@ -141,6 +161,68 @@ async def control_step(request: Request, body: ChatMessage, agent_id: str = "coo
     return {"status": "step_triggered", "agent_id": agent_id}
 
 
+@router.post("/control/spawn")
+async def control_spawn(request: Request, body: SpawnRequest):
+    """Spawn a new agent from the dashboard."""
+    mesh = request.app.state.mesh
+    aid = await mesh.spawn_agent(
+        role=body.role,
+        model=body.model,
+        system_prompt=body.system_prompt,
+        goal=body.goal,
+        agent_id=body.agent_id or None,
+    )
+    # Optionally start paused
+    if body.mode == "chat":
+        entry = mesh.agents.get(aid)
+        if entry:
+            entry["agent"]._paused = True
+    return {"status": "spawned", "agent_id": aid}
+
+
+@router.post("/control/kill")
+async def control_kill(request: Request, body: ModeChange):
+    """Kill an agent."""
+    mesh = request.app.state.mesh
+    ok = await mesh.kill_agent(body.agent_id)
+    if not ok:
+        return {"error": f"Agent {body.agent_id} not found"}
+    return {"status": "killed", "agent_id": body.agent_id}
+
+
+@router.post("/control/pull")
+async def control_pull(request: Request, body: PullModelRequest):
+    """Download a model from Ollama registry."""
+    mm = request.app.state.mesh.model_manager
+    try:
+        result = await mm.pull_model(body.name)
+        return {"status": result, "name": body.name}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.post("/control/unload")
+async def control_unload(request: Request, body: PullModelRequest):
+    """Unload a model from VRAM."""
+    mm = request.app.state.mesh.model_manager
+    try:
+        result = await mm.unload_model(body.name)
+        return {"status": result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.post("/control/delete_model")
+async def control_delete_model(request: Request, body: PullModelRequest):
+    """Delete a model from disk."""
+    mm = request.app.state.mesh.model_manager
+    try:
+        result = await mm.delete_model(body.name)
+        return {"status": result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 @router.get("/resources")
 async def get_resources():
     """Return system resource stats (RAM, disk, GPU)."""
@@ -218,6 +300,377 @@ async def get_tasks(request: Request, status: str | None = None):
     """Return task board contents, optionally filtered by status."""
     tb = request.app.state.mesh.task_board
     return tb.list_tasks(status=status)
+
+
+# ------------------------------------------------------------------
+# Image serving + diffusion control
+# ------------------------------------------------------------------
+
+IMAGES_DIR = DATA_DIR / "images"
+
+
+@router.get("/images")
+async def list_images():
+    """List generated images."""
+    if not IMAGES_DIR.exists():
+        return []
+    files = sorted(IMAGES_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    result = []
+    for f in files:
+        if not f.is_file() or f.suffix == ".json":
+            continue
+        entry = {
+            "filename": f.name,
+            "size": f.stat().st_size,
+            "modified": f.stat().st_mtime,
+            "url": f"/api/images/{f.name}",
+            "meta": None,
+        }
+        meta_path = f.with_suffix(".json")
+        if meta_path.exists():
+            try:
+                entry["meta"] = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        result.append(entry)
+    return result
+
+
+@router.get("/images/{filename}")
+async def serve_image(filename: str):
+    """Serve a generated image file."""
+    # Sanitize: only allow simple filenames
+    safe = Path(filename).name
+    filepath = IMAGES_DIR / safe
+    if not filepath.exists() or not filepath.is_file():
+        return {"error": "Image not found"}
+    return FileResponse(filepath)
+
+
+@router.get("/diffusion/status")
+async def diffusion_status(request: Request):
+    """Get diffusion pipeline status."""
+    dp = request.app.state.mesh.diffusion_provider
+    return dp.status()
+
+
+@router.get("/diffusion/models")
+async def diffusion_models(request: Request):
+    """List available diffusion models."""
+    dp = request.app.state.mesh.diffusion_provider
+    return dp.available_models()
+
+
+class GenerateImageRequest(BaseModel):
+    prompt: str
+    model: str = ""
+    negative_prompt: str = ""
+    width: int = 1024
+    height: int = 1024
+    steps: int = 20
+    guidance_scale: float = 7.5
+    clip_skip: int = 0
+    seed: int = -1
+    batch_count: int = 1
+
+
+@router.post("/diffusion/generate")
+async def diffusion_generate(request: Request, body: GenerateImageRequest):
+    """Generate image(s) directly from a prompt — no agent needed."""
+    dp = request.app.state.mesh.diffusion_provider
+    try:
+        results = await dp.generate_image(
+            prompt=body.prompt,
+            model=body.model,
+            negative_prompt=body.negative_prompt,
+            width=body.width,
+            height=body.height,
+            steps=body.steps,
+            guidance_scale=body.guidance_scale,
+            clip_skip=body.clip_skip,
+            seed=body.seed,
+            batch_count=body.batch_count,
+        )
+        return {"images": results, "count": len(results)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.post("/diffusion/unload")
+async def diffusion_unload(request: Request):
+    """Unload diffusion pipeline to free VRAM."""
+    dp = request.app.state.mesh.diffusion_provider
+    result = await dp.unload()
+    return {"status": result}
+
+
+class LoadModelRequest(BaseModel):
+    model: str
+
+
+class AddDiffusionModelRequest(BaseModel):
+    model: str
+    source: str = "huggingface"  # "huggingface", "civitai", "ollama"
+    format: str = "safetensors"  # "safetensors" or "gguf"
+    # HuggingFace GGUF fields
+    gguf_repo: str = ""
+    gguf_file: str = ""
+    base_pipeline: str = ""
+    # CivitAI fields
+    download_url: str = ""
+    civitai_filename: str = ""
+    pipeline_class: str = "StableDiffusionXLPipeline"
+    # Common
+    description: str = ""
+    vram: str = ""
+    recommended: Optional[dict] = None
+
+
+@router.post("/diffusion/load")
+async def diffusion_load(request: Request, body: LoadModelRequest):
+    """Load (swap to) a diffusion pipeline model."""
+    dp = request.app.state.mesh.diffusion_provider
+    try:
+        result = await dp.load(body.model)
+        return {"status": result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.post("/diffusion/add_model")
+async def diffusion_add_model(request: Request, body: AddDiffusionModelRequest):
+    """Add a custom model to the tracked list without loading it."""
+    dp = request.app.state.mesh.diffusion_provider
+    if body.source == "civitai":
+        dp.add_civitai_model(
+            name=body.model,
+            download_url=body.download_url,
+            civitai_filename=body.civitai_filename,
+            pipeline_class=body.pipeline_class,
+            description=body.description,
+            vram=body.vram,
+            recommended=body.recommended,
+        )
+    elif body.format == "gguf":
+        dp.add_gguf_model(
+            name=body.model,
+            gguf_repo=body.gguf_repo,
+            gguf_file=body.gguf_file,
+            base_pipeline=body.base_pipeline,
+            description=body.description,
+            vram=body.vram,
+        )
+    else:
+        dp._used_models.add(body.model)
+    return {"status": "added", "model": body.model}
+
+
+# ------------------------------------------------------------------
+# CivitAI model resolution
+# ------------------------------------------------------------------
+
+def _parse_civitai_id(url_or_id: str) -> int:
+    """Extract a CivitAI model ID from a URL or raw ID string."""
+    url_or_id = url_or_id.strip()
+    if url_or_id.isdigit():
+        return int(url_or_id)
+    m = re.search(r'civitai\.com/models/(\d+)', url_or_id)
+    if m:
+        return int(m.group(1))
+    raise ValueError(f"Cannot parse CivitAI model ID from: {url_or_id}")
+
+
+class ResolveCivitaiRequest(BaseModel):
+    url: str
+
+
+@router.post("/diffusion/resolve_civitai")
+async def resolve_civitai(request: Request, body: ResolveCivitaiRequest):
+    """Resolve a CivitAI model URL/ID to downloadable metadata."""
+    from app.models.huggingface import CIVITAI_PIPELINE_MAP
+
+    try:
+        model_id = _parse_civitai_id(body.url)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if CIVITAI_API_KEY:
+        headers["Authorization"] = f"Bearer {CIVITAI_API_KEY}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://civitai.com/api/v1/models/{model_id}",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        return {"error": f"CivitAI returned {exc.response.status_code}"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    versions = []
+    for v in data.get("modelVersions", []):
+        base_model = v.get("baseModel", "")
+        pipeline_class = CIVITAI_PIPELINE_MAP.get(base_model, "StableDiffusionXLPipeline")
+        files = []
+        for f in v.get("files", []):
+            fmt = (f.get("metadata") or {}).get("format", "")
+            if fmt in ("SafeTensor", "PickleTensor", ""):
+                files.append({
+                    "name": f.get("name", ""),
+                    "size_kb": f.get("sizeKb"),
+                    "format": fmt or "Other",
+                    "fp": (f.get("metadata") or {}).get("fp", ""),
+                })
+        download_url = v.get("downloadUrl", "")
+        if files:
+            versions.append({
+                "id": v["id"],
+                "name": v.get("name", ""),
+                "base_model": base_model,
+                "pipeline_class": pipeline_class,
+                "download_url": download_url,
+                "files": files,
+            })
+
+    return {
+        "name": data.get("name", ""),
+        "type": data.get("type", ""),
+        "model_id": model_id,
+        "versions": versions,
+    }
+
+
+# ------------------------------------------------------------------
+# Audio serving + generation
+# ------------------------------------------------------------------
+
+AUDIO_DIR = DATA_DIR / "audio"
+
+
+class GenerateAudioRequest(BaseModel):
+    prompt: str
+    model: str = ""
+    duration: float = 10.0
+    guidance_scale: float = 3.0
+    filename: str = ""
+    batch_count: int = 1
+
+
+@router.get("/audio")
+async def list_audio():
+    """List generated audio files."""
+    if not AUDIO_DIR.exists():
+        return []
+    files = sorted(AUDIO_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    result = []
+    for f in files:
+        if not f.is_file() or f.suffix == ".json":
+            continue
+        entry = {
+            "filename": f.name,
+            "size": f.stat().st_size,
+            "modified": f.stat().st_mtime,
+            "url": f"/api/audio/{f.name}",
+            "duration": None,
+            "meta": None,
+        }
+        # Read WAV header to get actual duration
+        try:
+            import wave
+            with wave.open(str(f), 'rb') as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate()
+                if rate > 0:
+                    entry["duration"] = round(frames / rate, 2)
+        except Exception:
+            pass
+        # Load sidecar metadata
+        meta_path = f.with_suffix(".json")
+        if meta_path.exists():
+            try:
+                entry["meta"] = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        result.append(entry)
+    return result
+
+
+@router.get("/audio/{filename}")
+async def serve_audio(filename: str):
+    """Serve a generated audio file."""
+    safe = Path(filename).name
+    filepath = AUDIO_DIR / safe
+    if not filepath.exists() or not filepath.is_file():
+        return {"error": "Audio not found"}
+    return FileResponse(filepath, media_type="audio/wav")
+
+
+@router.get("/audio_gen/status")
+async def audio_status(request: Request):
+    """Get audio pipeline status."""
+    ap = request.app.state.mesh.audio_provider
+    return ap.status()
+
+
+@router.get("/audio_gen/models")
+async def audio_models(request: Request):
+    """List available audio generation models."""
+    ap = request.app.state.mesh.audio_provider
+    return ap.available_models()
+
+
+@router.post("/audio_gen/generate")
+async def audio_generate(request: Request, body: GenerateAudioRequest):
+    """Generate audio directly from a prompt."""
+    ap = request.app.state.mesh.audio_provider
+    try:
+        results = await ap.generate_audio(
+            prompt=body.prompt,
+            model=body.model,
+            duration=body.duration,
+            guidance_scale=body.guidance_scale,
+            filename=body.filename,
+            batch_count=body.batch_count,
+        )
+        return {"clips": results, "count": len(results)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.post("/audio_gen/unload")
+async def audio_unload(request: Request):
+    """Unload audio pipeline to free VRAM."""
+    ap = request.app.state.mesh.audio_provider
+    result = await ap.unload()
+    return {"status": result}
+
+
+@router.post("/audio_gen/load")
+async def audio_load(request: Request, body: LoadModelRequest):
+    """Load (swap to) an audio pipeline model."""
+    ap = request.app.state.mesh.audio_provider
+    try:
+        result = await ap.load(body.model)
+        return {"status": result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+class AddAudioModelRequest(BaseModel):
+    model: str
+    source: str = "huggingface"  # "huggingface", "civitai", "ollama"
+
+
+@router.post("/audio_gen/add_model")
+async def audio_add_model(request: Request, body: AddAudioModelRequest):
+    """Add a custom model to the tracked list without loading it."""
+    ap = request.app.state.mesh.audio_provider
+    ap._used_models.add(body.model)
+    return {"status": "added", "model": body.model}
 
 
 # ------------------------------------------------------------------

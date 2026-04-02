@@ -15,6 +15,8 @@ from app.tools.primitive.resources import make_resource_tools
 from app.tools.primitive.oracle import make_oracle_tools
 from app.tools.primitive.tasks import make_task_tools
 from app.tools.primitive.memory import make_memory_tools
+from app.tools.primitive.images import make_image_tools
+from app.tools.primitive.audio import make_audio_tools
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,8 @@ class ToolRegistry:
         tools.extend(make_oracle_tools(mesh))
         tools.extend(make_task_tools(mesh))
         tools.extend(make_memory_tools(mesh))
+        tools.extend(make_image_tools(mesh))
+        tools.extend(make_audio_tools(mesh))
         tools.extend(make_lifecycle_tools())
         tools.extend(self._load_dynamic())
         return tools

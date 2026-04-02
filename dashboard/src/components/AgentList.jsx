@@ -25,6 +25,9 @@ export default function AgentList({ agents }) {
           </div>
           <div style={cardMeta}>
             <span style={roleTag(a.role)}>{a.role}</span>
+            {a.mode && (
+              <span style={a.mode === 'chat' ? modeChatTag : modeAutoTag}>{a.mode}</span>
+            )}
           </div>
           <div style={modelRow}>
             <span style={modelIcon}>◆</span>
@@ -148,4 +151,14 @@ const activityText = {
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
+}
+
+const modeAutoTag = {
+  fontSize: 8, fontWeight: 700, color: '#3fb950',
+  background: '#3fb95018', borderRadius: 3, padding: '1px 5px',
+}
+
+const modeChatTag = {
+  fontSize: 8, fontWeight: 700, color: '#d29922',
+  background: '#d2992218', borderRadius: 3, padding: '1px 5px',
 }

@@ -10,6 +10,8 @@ from app.bus import EventBus
 from app.agents.base_agent import BaseAgent
 from app.models.manager import ModelManager
 from app.models.oracle import Oracle
+from app.models.huggingface import DiffusionProvider
+from app.models.audiogen import AudioProvider
 from app.memory.context_store import ContextStore
 from app.memory.note_store import NoteStore
 from app.tasks import TaskBoard
@@ -32,6 +34,8 @@ class AgentMesh:
         self.model_manager = ModelManager()
         self.context_store = ContextStore()
         self.note_store = NoteStore()
+        self.diffusion_provider = DiffusionProvider()
+        self.audio_provider = AudioProvider()
         self.oracle = Oracle(
             api_url=ORACLE_API_URL,
             api_key=ORACLE_API_KEY,
