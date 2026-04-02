@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.dev/
+runs/
+data/
+workspace/
+node_modules/
+dashboard/dist/
+app/tools/dynamic/*.py
